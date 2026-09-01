@@ -153,18 +153,29 @@ class NavigationController:
         1. Smooth noisy angle measurements
         2. Prevent command oscillation using hysteresis
         3. Enforce minimum command duration for stability
+        4. PID control for smooth continuous steering
     """
     
     def __init__(self):
         self.smoothed_error = None  # Smoothed angle error (degrees)
         self.current_command = "STOP"
         self.last_command_change_time = 0.0
+        
+        # PID state
+        self.previous_error = None
+        self.integral = 0.0
+        self.last_update_time = None
     
     def reset(self):
         """Reset all state (call when markers are lost)."""
         self.smoothed_error = None
         self.current_command = "STOP"
         self.last_command_change_time = 0.0
+        
+        # Reset PID state
+        self.previous_error = None
+        self.integral = 0.0
+        self.last_update_time = None
     
     def update(self, raw_angle_error, target_marker_size_px):
         """
@@ -249,6 +260,106 @@ class NavigationController:
         if new_command != self.current_command:
             self.current_command = new_command
             self.last_command_change_time = time.time()
+    
+    def compute_pid(self, smoothed_error, target_marker_size_px):
+        """
+        Compute PID control output for smooth continuous steering.
+        
+        This replaces discrete LEFT/RIGHT/FORWARD commands with continuous
+        motor speed adjustments: left_speed = BASE + correction, right_speed = BASE - correction.
+        
+        Sign convention (verified from ESP32 code):
+            - Positive error (target to RIGHT) -> positive correction -> increase left motor speed
+            - Negative error (target to LEFT) -> negative correction -> increase right motor speed
+        
+        Args:
+            smoothed_error: smoothed angle error (degrees)
+            target_marker_size_px: apparent size of target marker
+        
+        Returns:
+            dict with keys:
+                left_speed: int (0-255 PWM)
+                right_speed: int (0-255 PWM)
+                p_term: float (proportional component)
+                i_term: float (integral component)
+                d_term: float (derivative component)
+                correction: float (total correction before clamping)
+                is_stopped: bool (True if target reached)
+        """
+        current_time = time.time()
+        
+        # Check if target is reached (distance check)
+        if target_marker_size_px >= config.STOP_MARKER_SIZE_PX:
+            # Target reached - stop motors and reset PID state
+            self.previous_error = None
+            self.integral = 0.0
+            self.last_update_time = None
+            return {
+                'left_speed': 0,
+                'right_speed': 0,
+                'p_term': 0.0,
+                'i_term': 0.0,
+                'd_term': 0.0,
+                'correction': 0.0,
+                'is_stopped': True
+            }
+        
+        # Adaptive base speed: slow down when close to target
+        if target_marker_size_px >= config.SLOW_DOWN_DISTANCE_PX:
+            base_speed = config.SLOW_DOWN_SPEED
+        else:
+            base_speed = config.BASE_SPEED
+        
+        # --- Proportional term ---
+        p_term = config.KP * smoothed_error
+        
+        # --- Derivative term ---
+        d_term = 0.0
+        if self.previous_error is not None and self.last_update_time is not None:
+            dt = current_time - self.last_update_time
+            if dt > 0:  # Avoid division by zero
+                error_change = smoothed_error - self.previous_error
+                d_term = config.KD * (error_change / dt)
+        
+        # --- Integral term ---
+        i_term = 0.0
+        if config.KI > 0 and self.last_update_time is not None:
+            dt = current_time - self.last_update_time
+            if dt > 0:
+                self.integral += smoothed_error * dt
+                # Anti-windup clamping
+                self.integral = max(-config.MAX_INTEGRAL, min(config.MAX_INTEGRAL, self.integral))
+                i_term = config.KI * self.integral
+        
+        # --- Total correction ---
+        correction = p_term + i_term + d_term
+        
+        # Clamp correction to limits
+        correction = max(-config.MAX_CORRECTION, min(config.MAX_CORRECTION, correction))
+        
+        # Compute motor speeds
+        # Positive correction -> increase left motor (turn right to correct rightward error)
+        # Negative correction -> increase right motor (turn left to correct leftward error)
+        left_speed = base_speed + correction
+        right_speed = base_speed - correction
+        
+        # Clamp motor speeds to valid range
+        left_speed = int(max(config.MIN_SPEED, min(config.MAX_SPEED, left_speed)))
+        right_speed = int(max(config.MIN_SPEED, min(config.MAX_SPEED, right_speed)))
+        
+        # Update state for next iteration
+        self.previous_error = smoothed_error
+        self.last_update_time = current_time
+        
+        return {
+            'left_speed': left_speed,
+            'right_speed': right_speed,
+            'p_term': p_term,
+            'i_term': i_term,
+            'd_term': d_term,
+            'correction': correction,
+            'is_stopped': False
+        }
 
 
 # Global controller instance (singleton pattern)

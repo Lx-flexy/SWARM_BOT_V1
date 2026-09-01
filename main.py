@@ -55,7 +55,7 @@ def send_command(command, link, calibrate_mode):
         link.send(command.lower(), force=(command == "STOP"))
 
 
-def draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode):
+def draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode, pid_data=None):
     """
     Draw navigation debug overlay on the video frame.
     
@@ -66,6 +66,7 @@ def draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode):
         target_found: bool
         status: string (status message)
         calibrate_mode: bool
+        pid_data: dict with PID components (or None)
     """
     h, w = frame.shape[:2]
     y = 30
@@ -77,7 +78,7 @@ def draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode):
         y += line_gap
 
     # Header
-    mode_str = " [CALIBRATE MODE]" if calibrate_mode else ""
+    mode_str = " [CALIBRATE MODE]" if calibrate_mode else " [PID MODE]"
     put(f"SWARM BOT{mode_str}", (255, 255, 0))
     put(f"BOT ID: {config.BOT_MARKER_ID}   TARGET ID: {config.TARGET_MARKER_ID}")
 
@@ -104,10 +105,17 @@ def draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode):
         err_color = (0, 255, 0) if abs(nav['angle_error_smoothed']) < config.TURN_EXIT_DEG else (0, 165, 255)
         put(f"SMOOTHED ERROR: {nav['angle_error_smoothed']:+7.2f} deg", err_color)
         
-        cmd = nav['command']
-        cmd_color = (0, 255, 0) if cmd == "FORWARD" else \
-                    (0, 165, 255) if cmd in ("LEFT", "RIGHT") else (0, 0, 255)
-        put(f"COMMAND:      {cmd}", cmd_color)
+        # Show PID data if available
+        if pid_data:
+            put(f"P: {pid_data['p_term']:+6.2f}  I: {pid_data['i_term']:+6.2f}  D: {pid_data['d_term']:+6.2f}", (150, 255, 150))
+            put(f"CORRECTION:    {pid_data['correction']:+7.2f}", (150, 255, 150))
+            put(f"LEFT SPEED:    {pid_data['left_speed']:3d}    RIGHT SPEED: {pid_data['right_speed']:3d}", (0, 255, 255))
+        else:
+            # Legacy command display
+            cmd = nav['command']
+            cmd_color = (0, 255, 0) if cmd == "FORWARD" else \
+                        (0, 165, 255) if cmd in ("LEFT", "RIGHT") else (0, 0, 255)
+            put(f"COMMAND:      {cmd}", cmd_color)
     
     put(f"STATUS:       {status}", (255, 255, 255))
 
@@ -187,6 +195,7 @@ def main():
 
         # ---------------- Navigation decision ----------------
         nav = None
+        pid_data = None
         command = "STOP"
         status = "NAVIGATING"
 
@@ -201,12 +210,25 @@ def main():
         elif bot_found and target_found:
             # Compute full navigation
             nav = compute_navigation(bot_corners, target_corners)
-            command = nav['command']
-            status = "TARGET REACHED" if command == "STOP" else "NAVIGATING"
             
-            # Print debug in calibrate mode
             if calibrate_mode:
+                # In calibrate mode, use legacy command system for display
+                command = nav['command']
+                status = "TARGET REACHED" if command == "STOP" else "NAVIGATING"
                 print_debug(nav)
+            else:
+                # Normal mode: use PID control for smooth steering
+                from navigation import _controller
+                pid_data = _controller.compute_pid(
+                    nav['angle_error_smoothed'],
+                    nav['target_size_px']
+                )
+                
+                if pid_data['is_stopped']:
+                    command = "STOP"
+                    status = "TARGET REACHED"
+                else:
+                    status = "NAVIGATING (PID)"
         else:
             # One marker missing but not past threshold yet
             command = "STOP"
@@ -214,13 +236,18 @@ def main():
 
         # Send command (or print in calibrate mode)
         if not calibrate_mode and link:
-            send_command(command, link, calibrate_mode)
+            if pid_data is not None and not pid_data['is_stopped']:
+                # Use PID motor control
+                link.send_motor_speeds(pid_data['left_speed'], pid_data['right_speed'])
+            else:
+                # Send STOP for: bot/target missing, target reached, or any error case
+                link.send('stop', force=True)
         elif calibrate_mode and nav:
             # In calibrate mode, only print when we have valid nav data
             pass  # already printed by print_debug above
 
         # Draw UI overlay
-        draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode)
+        draw_ui(frame, nav, bot_found, target_found, status, calibrate_mode, pid_data)
         cv2.imshow("SWARM BOT - ArUco Navigation", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):

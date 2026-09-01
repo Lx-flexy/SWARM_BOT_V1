@@ -11,6 +11,7 @@ ESP32_IP = "192.168.29.68"          # <-- set this to your ESP32's IP from Seria
 BASE_URL = f"http://{ESP32_IP}"
 COMMAND_COOLDOWN = 0.25              # min seconds between sending the SAME command again
 REQUEST_TIMEOUT = 0.4                # seconds to wait for ESP32 HTTP response
+MOTOR_SEND_INTERVAL_S = 0.05         # min seconds between motor speed updates (20 Hz)
 
 # ---------------- Camera ----------------
 CAMERA_INDEX = 1
@@ -86,6 +87,30 @@ MIN_COMMAND_DURATION = 0.15
 # Bigger marker on screen = robot is closer to it.
 # When target marker size >= this threshold, send STOP (target reached).
 STOP_MARKER_SIZE_PX = 140.0   # px; tune this based on your camera height/marker size
+
+# ============================================================================
+# PID CONTROLLER PARAMETERS (smooth steering)
+# ============================================================================
+# PID gains for continuous steering control
+# Start with P-only control, then add D, finally I if needed
+KP = 2.0           # Proportional gain: how aggressively to correct angle error (increased for sharper turns)
+KI = 0.0           # Integral gain: corrects persistent offset (usually not needed)
+KD = 1.5          # Derivative gain: dampens oscillation, adds smoothness (added to prevent overshoot)
+
+# Motor speed limits for PID control
+BASE_SPEED = 120        # Base PWM speed for both motors (increased from 100 for more forward momentum)
+MAX_CORRECTION = 80     # Maximum correction to add/subtract from base speed (increased from 50)
+MIN_SPEED = 30          # Minimum allowed motor speed (increased from 0 to maintain minimum forward motion)
+MAX_SPEED = 200         # Maximum allowed motor speed (increased from 180)
+
+# Integral anti-windup
+MAX_INTEGRAL = 100.0    # Maximum accumulated integral to prevent windup
+
+# Speed reduction near target (prevents circling)
+SLOW_DOWN_DISTANCE_PX = 100.0   # Start slowing down when target marker size exceeds this
+SLOW_DOWN_SPEED = 60            # Reduced base speed when close to target
+
+# ============================================================================
 
 # ---------------- Safety ----------------
 # If bot or target marker is not seen for this many consecutive frames, send STOP.

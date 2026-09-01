@@ -145,6 +145,39 @@ void handleStop() {
   server.send(200, "text/plain", "OK stop");
 }
 
+void handleSetMotors() {
+  // PID-based smooth steering: set individual motor speeds while moving forward
+  // Both motors use forward direction (same pin pattern as moveForward)
+  // but with independent PWM values for differential steering
+  
+  if (!server.hasArg("left") || !server.hasArg("right")) {
+    server.send(400, "text/plain", "Missing left or right parameter");
+    return;
+  }
+  
+  int leftSpeed = server.arg("left").toInt();
+  int rightSpeed = server.arg("right").toInt();
+  
+  // Clamp to valid PWM range
+  leftSpeed = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
+  
+  // Set both motors to forward direction (same as moveForward)
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+  
+  // Set independent speeds
+  ledcWrite(CH_A, leftSpeed);
+  ledcWrite(CH_B, rightSpeed);
+  
+  isStopped = (leftSpeed == 0 && rightSpeed == 0);
+  lastCommandTime = millis();  // Update safety timeout
+  
+  server.send(200, "text/plain", "OK set_motors");
+}
+
 void handleRoot() {
   String msg = "SWARM BOT ESP32 ready. Forward speed: ";
   msg += String(forwardSpeed);
@@ -189,6 +222,7 @@ void setup() {
   server.on("/left", handleLeft);
   server.on("/right", handleRight);
   server.on("/stop", handleStop);
+  server.on("/set_motors", handleSetMotors);
 
   server.begin();
   Serial.println("HTTP server started");
